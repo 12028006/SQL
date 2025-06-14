@@ -1,0 +1,96 @@
+# Troubleshooting and Optimizing Azure SQL Database Performance: A Practical Guide
+
+## Introduction
+
+During a recent incident, our Azure SQL Database experienced significant slowdowns. This blog-style README documents the queries and steps I used to diagnose and optimize performance, especially in an environment where two databases share a single elastic pool.
+
+## 1. Identifying the Problem
+
+When performance issues arise, the first step is to confirm the symptoms:
+- Slow query response times
+- Increased resource usage (CPU, memory, I/O)
+- Application timeouts or failures
+
+## 2. Diagnostic Queries Used
+
+Below are the key queries I used to investigate the root cause of the slowdown:
+
+### a. Resource Utilization Metrics
+Monitor CPU, memory, I/O, and log write usage:
+```sql
+SELECT end_time, avg_data_io_percent, avg_log_write_percent, avg_cpu_percent, avg_memory_usage_percent
+FROM sys.dm_db_resource_stats
+ORDER BY end_time DESC;
+```
+
+### b. Resource Governor Workload Group Stats
+Check for CPU limit violations and queue durations:
+```sql
+SELECT total_request_count, total_cpu_limit_violation_count, total_queue_duration_ms, total_cpu_usage_ms, total_log_io_wait_time_ms, total_data_io_wait_time_ms
+FROM sys.dm_db_resource_governor_workload_groups_stats;
+```
+
+### c. Wait Statistics
+Identify waits related to I/O and logging:
+```sql
+SELECT wait_type, wait_time_ms, waiting_tasks_count
+FROM sys.dm_db_wait_stats
+WHERE wait_type IN ('PAGEIOLATCH_SH', 'PAGEIOLATCH_EX', 'WRITELOG')
+ORDER BY wait_time_ms DESC;
+```
+
+### d. File Latency
+Check for disk I/O bottlenecks:
+```sql
+SELECT DB_NAME(database_id) AS [Database], file_id, io_stall_read_ms, num_of_reads, io_stall_write_ms, num_of_writes,
+CAST(io_stall_read_ms AS FLOAT)/NULLIF(num_of_reads, 0) AS avg_read_latency_ms,
+CAST(io_stall_write_ms AS FLOAT)/NULLIF(num_of_writes, 0) AS avg_write_latency_ms
+FROM sys.dm_io_virtual_file_stats(NULL, NULL);
+```
+
+### e. Active Requests and Space Usage
+Find sessions and requests consuming the most resources:
+```sql
+SELECT s.session_id, r.status, r.command, r.cpu_time, r.total_elapsed_time, t.text AS sql_text, tsu.internal_objects_alloc_page_count, tsu.user_objects_alloc_page_count
+FROM sys.dm_exec_requests r
+JOIN sys.dm_exec_sessions s ON r.session_id = s.session_id
+JOIN sys.dm_exec_sql_text(r.sql_handle) t ON r.sql_handle = t.sql_handle
+JOIN sys.dm_db_task_space_usage tsu ON r.task_address = tsu.task_address
+ORDER BY tsu.internal_objects_alloc_page_count DESC;
+```
+
+### f. Top Queries Using tempdb
+Identify queries that heavily use tempdb:
+```sql
+-- This query lists the top 20 queries that reference tempdb and have the highest logical writes.
+SELECT TOP 20 qs.execution_count, qs.total_logical_writes, qs.total_logical_reads, qs.creation_time, qs.last_execution_time,
+SUBSTRING(qt.text, (qs.statement_start_offset / 2) + 1, ((CASE qs.statement_end_offset WHEN -1 THEN DATALENGTH(qt.text) ELSE qs.statement_end_offset END - qs.statement_start_offset) / 2) + 1) AS query_text, qp.query_plan
+FROM sys.dm_exec_query_stats qs
+CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) qt
+CROSS APPLY sys.dm_exec_query_plan(qs.plan_handle) qp
+WHERE qt.text LIKE '%tempdb%'
+ORDER BY qs.total_logical_writes DESC;
+```
+
+## 3. Steps to Perform During Investigation
+
+1. **Run the above queries** to collect current resource and workload statistics.
+2. **Identify resource bottlenecks** (CPU, memory, I/O, tempdb usage).
+3. **Check for blocking or long-running queries** using sys.dm_exec_requests and sys.dm_exec_sessions.
+4. **Review execution plans** for expensive queries to look for missing indexes or inefficient operations.
+5. **Monitor elastic pool metrics** in the Azure Portal to see if the pool is under-provisioned.
+6. **Compare resource usage between the two databases** in the pool to identify if one is dominating resources.
+
+## 4. Best Practices for Azure SQL Database in Elastic Pools
+
+- **Right-size your pool:** Regularly monitor DTU/CPU/memory usage and adjust pool size as needed.
+- **Isolate heavy workloads:** If one database consistently uses more resources, consider moving it to a separate pool.
+- **Optimize queries:** Use Query Store and execution plans to tune slow or resource-intensive queries.
+- **Index maintenance:** Regularly rebuild/reorganize indexes and update statistics.
+- **Monitor tempdb usage:** Watch for queries that overuse tempdb and optimize them.
+- **Set up alerts:** Use Azure Monitor to alert on high resource usage or long-running queries.
+- **Review scaling options:** Consider scaling up during peak times or using auto-scale features.
+
+## 5. Conclusion
+
+By systematically running these queries and following best practices, you can quickly diagnose and resolve performance issues in Azure SQL Databases, especially when using elastic pools. Regular monitoring and proactive optimization are key to maintaining healthy and responsive databases.
